@@ -11,6 +11,7 @@ permissions:
 jobs:
   monitor:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
       - name: Checkout
@@ -21,17 +22,19 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
+      - name: Install Python dependencies
         run: pip install -r requirements.txt
+
+      - name: Install Playwright browser
+        run: python -m playwright install chromium
 
       - name: Run monitor
         env:
           X_ACCOUNTS: ${{ secrets.X_ACCOUNTS }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          CHECK_LIMIT: "5"
-          REQUEST_TIMEOUT: "20"
-          RETRY_TIMES: "3"
+          CHECK_LIMIT: "3"
+          PAGE_TIMEOUT_MS: "45000"
         run: python monitor_x.py
 
       - name: Commit state if changed
