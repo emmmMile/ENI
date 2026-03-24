@@ -112,12 +112,10 @@ def scrape_account(page, username):
     page.goto(url, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT_MS)
     page.wait_for_timeout(5000)
 
-    # 尝试接受可能的登录/弹窗前的页面渲染
     articles = page.locator("article")
     count = articles.count()
 
     if count == 0:
-        # 某些情况下再等一下
         page.wait_for_timeout(5000)
         count = articles.count()
 
@@ -127,8 +125,21 @@ def scrape_account(page, username):
     tweets = []
     seen_ids = set()
 
-    for i in range(min(count, CHECK_LIMIT * 2)):
+    for i in range(min(count, CHECK_LIMIT * 4)):
         article = articles.nth(i)
+
+        # 整个 article 的文本，拿来识别是否置顶
+        article_text = ""
+        try:
+            article_text = article.inner_text(timeout=3000)
+        except Exception:
+            pass
+
+        # 跳过置顶推文
+        # 兼容英文/中文界面
+        if any(flag in article_text for flag in ["Pinned", "置顶", "置頂"]):
+            log(f"[INFO] Skipping pinned tweet for @{username}")
+            continue
 
         text_parts = article.locator('[data-testid="tweetText"]')
         full_text = ""
@@ -180,7 +191,12 @@ def scrape_account(page, username):
             break
 
     tweets.sort(key=lambda x: int(x["id"]), reverse=True)
+
+    if not tweets:
+        raise RuntimeError(f"No non-pinned tweets found for @{username}")
+
     return tweets
+
 
 
 def main():
