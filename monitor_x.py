@@ -3,7 +3,7 @@ import os
 import re
 import sys
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta, timezone
 from pathlib import Path
 
 from dateutil import parser as date_parser
@@ -15,7 +15,7 @@ ACCOUNTS = [x.strip().lstrip("@") for x in os.getenv("X_ACCOUNTS", "").split(","
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
-CHECK_LIMIT = int(os.getenv("CHECK_LIMIT", "3"))
+CHECK_LIMIT = int(os.getenv("CHECK_LIMIT", "5"))
 PAGE_TIMEOUT_MS = int(os.getenv("PAGE_TIMEOUT_MS", "45000"))
 
 UTC8 = timezone(timedelta(hours=8))
@@ -45,13 +45,13 @@ def parse_time_to_utc8(raw_time):
     try:
         dt = date_parser.parse(raw_time)
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
+            return raw_time
         return dt.astimezone(UTC8).strftime("%Y-%m-%d %H:%M:%S UTC+8")
     except Exception:
         return raw_time
 
 
-def shorten(text, max_len=1000):
+def shorten(text, max_len=1200):
     text = re.sub(r"\s+", " ", (text or "")).strip()
     if len(text) <= max_len:
         return text
@@ -74,19 +74,20 @@ def send_telegram_message(text):
 
     req = urllib.request.Request(url, data=payload, method="POST")
     with urllib.request.urlopen(req, timeout=20) as resp:
-        body = resp.read().decode("utf-8", errors="ignore")
-        return body
+        return resp.read().decode("utf-8", errors="ignore")
 
 
 def format_message(username, tweet):
-    tweet_text = shorten(tweet.get("text", "") or "（未抓取到正文）", 1000)
+    tweet_text = shorten(tweet.get("text", "") or "（未抓取到正文）", 1200)
     created_at = tweet.get("created_at", "未知时间")
     tweet_url = tweet.get("url", f"https://x.com/{username}")
+    tweet_type = tweet.get("tweet_type", "作者发布")
 
     body = [
         "📢 ENI 生态监控提醒",
         "",
         f"👤 发推用户：@{username}",
+        f"🏷 推文状态：{tweet_type}",
         f"🕒 发布时间：{created_at}",
         "",
         "📝 推文内容：",
@@ -103,6 +104,20 @@ def extract_tweet_id_from_url(url):
         return None
     m = re.search(r"/status/(\d+)", url)
     return m.group(1) if m else None
+
+
+def detect_tweet_type(article_text, username):
+    text = article_text or ""
+
+    # 回复
+    if any(flag in text for flag in ["Replying to", "回复", "回覆"]):
+        return "回复"
+
+    # 转发 / Repost
+    if any(flag in text for flag in ["Reposted", " reposted ", "转发了", "轉發了"]):
+        return "转发"
+
+    return "作者发布"
 
 
 def scrape_account(page, username):
@@ -125,44 +140,50 @@ def scrape_account(page, username):
     tweets = []
     seen_ids = set()
 
-    for i in range(min(count, CHECK_LIMIT * 4)):
+    for i in range(min(count, CHECK_LIMIT * 6)):
         article = articles.nth(i)
 
-        # 整个 article 的文本，拿来识别是否置顶
         article_text = ""
         try:
             article_text = article.inner_text(timeout=3000)
         except Exception:
             pass
 
-        # 跳过置顶推文
-        # 兼容英文/中文界面
+        # 跳过置顶
         if any(flag in article_text for flag in ["Pinned", "置顶", "置頂"]):
             log(f"[INFO] Skipping pinned tweet for @{username}")
             continue
 
-        text_parts = article.locator('[data-testid="tweetText"]')
+        tweet_type = detect_tweet_type(article_text, username)
+
+        # 抓正文
         full_text = ""
+        text_parts = article.locator('[data-testid="tweetText"]')
         if text_parts.count() > 0:
             parts = []
             for j in range(text_parts.count()):
                 try:
-                    parts.append(text_parts.nth(j).inner_text().strip())
+                    part = text_parts.nth(j).inner_text().strip()
+                    if part:
+                        parts.append(part)
                 except Exception:
-                    pass
-            full_text = "\n".join([p for p in parts if p.strip()])
+                    continue
+            full_text = "\n".join(parts).strip()
 
-        links = article.locator('a[href*="/status/"]')
+        # 抓链接和 tweet id
         tweet_url = None
         tweet_id = None
+        links = article.locator('a[href*="/status/"]')
 
         for j in range(links.count()):
             try:
                 href = links.nth(j).get_attribute("href")
-                if href and f"/{username}/status/" in href:
-                    tweet_url = href if href.startswith("http") else f"https://x.com{href}"
-                    tweet_id = extract_tweet_id_from_url(tweet_url)
-                    if tweet_id:
+                if href and "/status/" in href:
+                    candidate = href if href.startswith("http") else f"https://x.com{href}"
+                    candidate_id = extract_tweet_id_from_url(candidate)
+                    if candidate_id:
+                        tweet_url = candidate
+                        tweet_id = candidate_id
                         break
             except Exception:
                 continue
@@ -172,8 +193,9 @@ def scrape_account(page, username):
 
         seen_ids.add(tweet_id)
 
-        time_node = article.locator("time")
+        # 抓时间
         raw_time = ""
+        time_node = article.locator("time")
         if time_node.count() > 0:
             try:
                 raw_time = time_node.first.get_attribute("datetime") or ""
@@ -182,9 +204,10 @@ def scrape_account(page, username):
 
         tweets.append({
             "id": tweet_id,
-            "text": full_text.strip(),
+            "text": full_text,
             "url": tweet_url,
             "created_at": parse_time_to_utc8(raw_time),
+            "tweet_type": tweet_type,
         })
 
         if len(tweets) >= CHECK_LIMIT:
@@ -196,7 +219,6 @@ def scrape_account(page, username):
         raise RuntimeError(f"No non-pinned tweets found for @{username}")
 
     return tweets
-
 
 
 def main():
@@ -231,7 +253,6 @@ def main():
                 latest_id = tweets[0]["id"]
                 last_seen = state.get(username)
 
-                # 首次运行只初始化，不推送
                 if not last_seen:
                     state[username] = latest_id
                     changed = True
@@ -241,7 +262,7 @@ def main():
                 new_tweets = [t for t in tweets if int(t["id"]) > int(last_seen)]
 
                 if not new_tweets:
-                    log(f"[OK] @{username} no new tweet")
+                    log(f"[OK] @{username} no new tweet, latest seen: {last_seen}, latest scraped: {latest_id}")
                     continue
 
                 new_tweets.sort(key=lambda x: int(x["id"]))
