@@ -140,7 +140,7 @@ def scrape_account(page, username):
     tweets = []
     seen_ids = set()
 
-    for i in range(min(count, CHECK_LIMIT * 6)):
+    for i in range(min(count, CHECK_LIMIT * 8)):
         article = articles.nth(i)
 
         article_text = ""
@@ -170,37 +170,45 @@ def scrape_account(page, username):
                     continue
             full_text = "\n".join(parts).strip()
 
-        # 抓链接和 tweet id
+        # 关键修复：只取“当前账号自己的主推文链接”
         tweet_url = None
         tweet_id = None
-        links = article.locator('a[href*="/status/"]')
 
-        for j in range(links.count()):
+        # 先找 time 节点的父级链接，这通常是主推文 permalink
+        time_node = article.locator("time")
+        raw_time = ""
+        if time_node.count() > 0:
             try:
-                href = links.nth(j).get_attribute("href")
-                if href and "/status/" in href:
-                    candidate = href if href.startswith("http") else f"https://x.com{href}"
-                    candidate_id = extract_tweet_id_from_url(candidate)
-                    if candidate_id:
-                        tweet_url = candidate
-                        tweet_id = candidate_id
-                        break
+                raw_time = time_node.first.get_attribute("datetime") or ""
+                parent_link = time_node.first.locator("xpath=ancestor::a[1]")
+                if parent_link.count() > 0:
+                    href = parent_link.first.get_attribute("href")
+                    if href and f"/{username}/status/" in href:
+                        tweet_url = href if href.startswith("http") else f"https://x.com{href}"
+                        tweet_id = extract_tweet_id_from_url(tweet_url)
             except Exception:
-                continue
+                pass
+
+        # 如果 time 上没拿到，再退回到 article 里的链接，但必须是当前账号自己的
+        if not tweet_id:
+            links = article.locator(f'a[href*="/{username}/status/"]')
+            for j in range(links.count()):
+                try:
+                    href = links.nth(j).get_attribute("href")
+                    if href and f"/{username}/status/" in href:
+                        candidate = href if href.startswith("http") else f"https://x.com{href}"
+                        candidate_id = extract_tweet_id_from_url(candidate)
+                        if candidate_id:
+                            tweet_url = candidate
+                            tweet_id = candidate_id
+                            break
+                except Exception:
+                    continue
 
         if not tweet_id or tweet_id in seen_ids:
             continue
 
         seen_ids.add(tweet_id)
-
-        # 抓时间
-        raw_time = ""
-        time_node = article.locator("time")
-        if time_node.count() > 0:
-            try:
-                raw_time = time_node.first.get_attribute("datetime") or ""
-            except Exception:
-                pass
 
         tweets.append({
             "id": tweet_id,
@@ -219,6 +227,7 @@ def scrape_account(page, username):
         raise RuntimeError(f"No non-pinned tweets found for @{username}")
 
     return tweets
+
 
 
 def main():
